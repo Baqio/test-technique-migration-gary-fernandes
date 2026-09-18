@@ -5,46 +5,70 @@ class ProductPrice::Import::Cavegest < Importer::Base
   GRID_CODES = %w[DEPC CHR EXPO PART SALON].freeze
 
   def call
-    imported = 0
+    # Gestion encodage ISO-8859-1 et détection ligne d'en-tête
+    raw_lines = File.readlines(path, encoding: "ISO-8859-1:UTF-8")
+    header_index = raw_lines.index { |line| line.start_with?("Ref;") }
+    return unless header_index
 
-    CSV.parse(File.read(path), headers: true, col_sep: COLUMN_SEP).each do |row|
+    csv_content = raw_lines[header_index..].join
+
+    CSV.parse(csv_content, headers: true, col_sep: COLUMN_SEP).each_with_index do |row, index|
+      line_number = header_index + index + 2
       reference = N.text(row["Ref"])
-      next if reference.nil?
 
-      product = Product.create!(
-        reference: reference,
+      # Ignorer lignes vides, sous-totaux et catégories
+      next if reference.nil? || reference.start_with?("---") || reference.start_with?("SOUS-TOTAL")
+
+      vat_rate = N.decimal(row["TVA"]) || BigDecimal("20.0")
+
+      # Idempotence : mise à jour ou création selon référence
+      product = Product.find_or_initialize_by(reference: reference)
+      product.update!(
         name:      N.text(row["Désignation"]),
-        color:     N.text(row["Couleur"]),
-        volume_ml: volume_ml(row["Contenant"]),
-        vat_rate:  N.decimal(row["TVA"]),
+        vintage:   N.vintage(row["Désignation"]),
+        color:     N.color(row["Couleur"]),
+        volume_ml: N.volume_ml(row["Contenant"]),
+        vat_rate:  vat_rate,
         stock:     N.decimal(row["Stock"]).to_i
       )
 
-      import_prices(product, row)
-      imported += 1
+      import_prices(product, row, vat_rate: vat_rate, line_number: line_number)
     end
-
-    puts "#{imported} produits importés"
   end
 
   private
 
-  def import_prices(product, row)
+  def import_prices(product, row, vat_rate:, line_number:)
+    imported_prices_count = 0
+
     GRID_CODES.each do |grid_code|
-      amount = N.decimal(row[grid_code])
+      raw_price = row[grid_code]
+      next if raw_price.nil? || raw_price.to_s.strip.empty?
 
-      # La grille EXPO est saisie en TTC dans CaveGest, on stocke du HT.
-      amount /= 1.2 if grid_code == "EXPO"
+      amount = N.decimal(raw_price)
+      if amount.nil?
+        report.add_warning(line_number: line_number, ref: product.reference, message: "Prix invalide pour la grille #{grid_code} (#{raw_price})")
+        next
+      end
 
-      ProductPrice.create!(
-        product:   product,
-        grid_code: grid_code,
-        amount_ht: amount.round(2)
-      )
+      # Alerte si montant incohérent
+      if amount <= 0
+        report.add_warning(line_number: line_number, ref: product.reference, message: "Prix suspect (#{amount} €) pour la grille #{grid_code}")
+      end
+
+      # Conversion TTC -> HT selon TVA produit pour la grille EXPO
+      amount_ht = grid_code == "EXPO" ? (amount / (1 + (vat_rate / BigDecimal("100")))).round(4) : amount
+
+      price = ProductPrice.find_or_initialize_by(product: product, grid_code: grid_code)
+      price.amount_ht = amount_ht
+      price.save!
+
+      imported_prices_count += 1
     end
-  end
 
-  def volume_ml(value)
-    value.to_s[/\d+/].to_i * 10
+    # Alerte si aucun prix renseigné
+    if imported_prices_count.zero?
+      report.add_warning(line_number: line_number, ref: product.reference, message: "Aucun tarif renseigné pour ce produit")
+    end
   end
 end
