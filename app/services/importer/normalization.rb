@@ -1,11 +1,14 @@
-require "bigdecimal"
-
 module Importer::Normalization
   module_function
 
   COUNTRY_MAP = {
     "FRANCE" => "FR",
-    "FR"     => "FR"
+    "BELGIQUE" => "BE",
+    "SUISSE" => "CH",
+    "LUXEMBOURG" => "LU",
+    "ALLEMAGNE" => "DE",
+    "ESPAGNE" => "ES",
+    "ITALIE" => "IT"
   }.freeze
 
   def text(value)
@@ -23,8 +26,8 @@ module Importer::Normalization
 
     if country_code.to_s.upcase.start_with?("FR")
       case str.length
-      when 2 then "#{str}000" # Ex: 78 -> 78000
-      when 4 then "0#{str}"   # Ex: 4000 -> 04000, 1000 -> 01000
+      when 2 then "#{str}000"
+      when 4 then "0#{str}"
       else str
       end
     else
@@ -33,11 +36,9 @@ module Importer::Normalization
   end
 
   def country_code(value)
-    return nil if value.nil?
+    return "FR" if value.blank?
 
     str = value.to_s.strip.upcase
-    return nil if str.empty?
-
     COUNTRY_MAP[str] || (str =~ /^[A-Z]{2}$/ ? str : nil)
   end
 
@@ -53,26 +54,26 @@ module Importer::Normalization
   end
 
   def volume_ml(value)
-    return nil if value.nil?
+    return nil if value.blank?
 
     str = value.to_s.strip
-    return nil if str.empty?
 
     case str
     when /(\d+(?:[.,]\d+)?)\s*ml/i
-      (BigDecimal($1.tr(",", "."))).to_i
+      BigDecimal($1.tr(",", ".")).to_i
     when /(\d+(?:[.,]\d+)?)\s*cl/i
-      (BigDecimal($1.tr(",", ".")) * 10).to_i
+      (BigDecimal($1.tr(",", ".")) * 10).round
     when /(\d+(?:[.,]\d+)?)\s*l\b/i
-      (BigDecimal($1.tr(",", ".")) * 1000).to_i
-    when /\b(?:6\s*x\s*)?(\d{2,3})\b/ # Cas standard "75" ou "6x75" (exprimé en cl)
-      $1.to_i * 10
+      (BigDecimal($1.tr(",", ".")) * 1000).round
+    when /\b(?:6\s*x\s*|carton\s*\d*|btle|bouteille)?\s*(\d{2,3}(?:[.,]\d+)?)\b/i
+      val = BigDecimal($1.tr(",", "."))
+      val == 6 ? 750 : (val * 10).round
     else
-      num = str[/\d+(?:[.,]\d+)?/]
-      return nil unless num
+      match = str.match(/(\d+(?:[.,]\d+)?)/)
+      return nil unless match
 
-      val = BigDecimal(num.tr(",", "."))
-      val < 10 ? (val * 1000).to_i : (val * 10).to_i
+      val = BigDecimal(match[1].tr(",", "."))
+      val < 10 ? 750 : (val * 10).round
     end
   end
 
